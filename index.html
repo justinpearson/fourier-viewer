@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2D Fourier Transform Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.4em;
+    margin-bottom: 12px;
+    color: #a0c4ff;
+  }
+  .toolbar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .toolbar label {
+    font-size: 0.85em;
+    color: #aaa;
+  }
+  .toolbar input[type="range"] {
+    width: 80px;
+    vertical-align: middle;
+  }
+  .toolbar select, .toolbar button {
+    background: #2a2a4a;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+  }
+  .toolbar button:hover { background: #3a3a5a; }
+  .toolbar button.active { background: #4a6fa5; border-color: #6a9fd5; }
+  .panels {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .panel-label {
+    font-size: 0.9em;
+    margin-bottom: 6px;
+    color: #8cb4e0;
+    font-weight: 600;
+  }
+  .panel-sublabel {
+    font-size: 0.72em;
+    color: #777;
+    margin-bottom: 4px;
+    height: 1.2em;
+  }
+  canvas {
+    border: 2px solid #333;
+    cursor: crosshair;
+    image-rendering: pixelated;
+    background: #000;
+  }
+  .info {
+    margin-top: 14px;
+    font-size: 0.75em;
+    color: #666;
+    max-width: 800px;
+    text-align: center;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<h1>2D Discrete Fourier Transform Viewer</h1>
+
+<div class="toolbar">
+  <label>Brush: <input type="range" id="brushSize" min="1" max="20" value="3"></label>
+  <label>Value: <input type="range" id="brushValue" min="0" max="255" value="255"></label>
+  <button id="btnClear">Clear All</button>
+  <button id="btnPresetLines">Preset: Lines</button>
+  <button id="btnPresetDot">Preset: Center Dot</button>
+  <button id="btnPresetBox">Preset: Box</button>
+  <button id="btnPresetDiag">Preset: Diagonal</button>
+  <label>Display size: <select id="displayScale">
+    <option value="1">1x</option>
+    <option value="2" selected>2x</option>
+    <option value="3">3x</option>
+  </select></label>
+  <label>Log amplitude <input type="checkbox" id="logScale" checked></label>
+  <button id="btnImport">Import Image</button>
+  <button id="btnExportJSON">Export JSON</button>
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-label">Spatial Domain</div>
+    <div class="panel-sublabel">f(x, y) — real-valued image</div>
+    <canvas id="canvasSpatial"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-label">Frequency Amplitude</div>
+    <div class="panel-sublabel">|F(u, v)| — magnitude spectrum</div>
+    <canvas id="canvasAmplitude"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-label">Frequency Phase</div>
+    <div class="panel-sublabel">∠F(u, v) — phase spectrum</div>
+    <canvas id="canvasPhase"></canvas>
+  </div>
+</div>
+
+<div class="info">
+  Draw on any panel. Edits to amplitude/phase are mirrored (conjugate symmetry) to keep the spatial image real-valued.<br>
+  The frequency panels show the DC component at center. Amplitude uses log scaling by default: log(1 + |F|).
+</div>
+
+<script>
+// ===== FFT Implementation =====
+// 1D Cooley-Tukey FFT (in-place, radix-2, iterative)
+// real[i], imag[i] are the complex components
+
+function fft1d(real, imag, invert) {
+  const n = real.length;
+  if (n === 1) return;
+
+  // Bit-reversal permutation
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) {
+      j ^= bit;
+    }
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
+    }
+  }
+
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = 2 * Math.PI / len * (invert ? 1 : -1);
+    const wRe = Math.cos(ang);
+    const wIm = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const uRe = real[i + j];
+        const uIm = imag[i + j];
+        const vRe = real[i + j + len / 2] * curRe - imag[i + j + len / 2] * curIm;
+        const vIm = real[i + j + len / 2] * curIm + imag[i + j + len / 2] * curRe;
+        real[i + j] = uRe + vRe;
+        imag[i + j] = uIm + vIm;
+        real[i + j + len / 2] = uRe - vRe;
+        imag[i + j + len / 2] = uIm - vIm;
+        const newCurRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = newCurRe;
+      }
+    }
+  }
+
+  if (invert) {
+    for (let i = 0; i < n; i++) {
+      real[i] /= n;
+      imag[i] /= n;
+    }
+  }
+}
+
+// 2D FFT: apply 1D FFT to each row, then each column
+function fft2d(real, imag, N, invert) {
+  const rowR = new Float64Array(N);
+  const rowI = new Float64Array(N);
+
+  // Rows
+  for (let y = 0; y < N; y++) {
+    const off = y * N;
+    for (let x = 0; x < N; x++) {
+      rowR[x] = real[off + x];
+      rowI[x] = imag[off + x];
+    }
+    fft1d(rowR, rowI, invert);
+    for (let x = 0; x < N; x++) {
+      real[off + x] = rowR[x];
+      imag[off + x] = rowI[x];
+    }
+  }
+
+  // Columns
+  const colR = new Float64Array(N);
+  const colI = new Float64Array(N);
+  for (let x = 0; x < N; x++) {
+    for (let y = 0; y < N; y++) {
+      colR[y] = real[y * N + x];
+      colI[y] = imag[y * N + x];
+    }
+    fft1d(colR, colI, invert);
+    for (let y = 0; y < N; y++) {
+      real[y * N + x] = colR[y];
+      imag[y * N + x] = colI[y];
+    }
+  }
+}
+
+// ===== Application State =====
+const N = 128; // Image size (power of 2)
+
+// Spatial domain (real-valued, so imag is always 0 for spatial)
+let spatialReal = new Float64Array(N * N);
+let spatialImag = new Float64Array(N * N); // should stay ~0
+
+// Frequency domain
+let freqReal = new Float64Array(N * N);
+let freqImag = new Float64Array(N * N);
+
+// Cached amplitude and phase (in "display" order, i.e. DC-centered)
+let ampDisplay = new Float64Array(N * N);
+let phaseDisplay = new Float64Array(N * N);
+
+// ===== Canvas Setup =====
+const canvasSpatial = document.getElementById('canvasSpatial');
+const canvasAmplitude = document.getElementById('canvasAmplitude');
+const canvasPhase = document.getElementById('canvasPhase');
+
+const ctxSpatial = canvasSpatial.getContext('2d');
+const ctxAmplitude = canvasAmplitude.getContext('2d');
+const ctxPhase = canvasPhase.getContext('2d');
+
+function updateCanvasSize() {
+  const scale = parseInt(document.getElementById('displayScale').value);
+  const size = N * scale;
+  [canvasSpatial, canvasAmplitude, canvasPhase].forEach(c => {
+    c.width = size;
+    c.height = size;
+  });
+  renderAll();
+}
+
+document.getElementById('displayScale').addEventListener('change', updateCanvasSize);
+document.getElementById('logScale').addEventListener('change', () => renderAll());
+
+// ===== FFT Shift: swap quadrants so DC is at center =====
+function fftShiftIndex(x, y) {
+  // Map display (DC-centered) coords to FFT (DC-at-corner) coords
+  return [((x + N / 2) % N), ((y + N / 2) % N)];
+}
+
+// ===== Forward transform: spatial -> freq =====
+function forwardFFT() {
+  freqReal.set(spatialReal);
+  freqImag.set(spatialImag);
+  fft2d(freqReal, freqImag, N, false);
+  updateFreqDisplayCache();
+}
+
+// ===== Inverse transform: freq -> spatial =====
+function inverseFFT() {
+  spatialReal.set(freqReal);
+  spatialImag.set(freqImag);
+  fft2d(spatialReal, spatialImag, N, true);
+  // Spatial should be real; zero out tiny imaginary residuals
+  for (let i = 0; i < N * N; i++) {
+    spatialImag[i] = 0;
+  }
+}
+
+// ===== Update amplitude/phase display cache =====
+function updateFreqDisplayCache() {
+  for (let dy = 0; dy < N; dy++) {
+    for (let dx = 0; dx < N; dx++) {
+      const [fx, fy] = fftShiftIndex(dx, dy);
+      const idx = fy * N + fx;
+      const re = freqReal[idx];
+      const im = freqImag[idx];
+      const didx = dy * N + dx;
+      ampDisplay[didx] = Math.sqrt(re * re + im * im);
+      phaseDisplay[didx] = Math.atan2(im, re);
+    }
+  }
+}
+
+// ===== Rendering =====
+function renderSpatial() {
+  const scale = parseInt(document.getElementById('displayScale').value);
+  const imgData = ctxSpatial.createImageData(N * scale, N * scale);
+  // Find min/max for normalization
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < N * N; i++) {
+    if (spatialReal[i] < mn) mn = spatialReal[i];
+    if (spatialReal[i] > mx) mx = spatialReal[i];
+  }
+  const range = mx - mn || 1;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const v = Math.round(((spatialReal[y * N + x] - mn) / range) * 255);
+      for (let sy = 0; sy < scale; sy++) {
+        for (let sx = 0; sx < scale; sx++) {
+          const pi = ((y * scale + sy) * N * scale + (x * scale + sx)) * 4;
+          imgData.data[pi] = v;
+          imgData.data[pi + 1] = v;
+          imgData.data[pi + 2] = v;
+          imgData.data[pi + 3] = 255;
+        }
+      }
+    }
+  }
+  ctxSpatial.putImageData(imgData, 0, 0);
+}
+
+function renderAmplitude() {
+  const scale = parseInt(document.getElementById('displayScale').value);
+  const useLog = document.getElementById('logScale').checked;
+  const imgData = ctxAmplitude.createImageData(N * scale, N * scale);
+  let mx = 0;
+  for (let i = 0; i < N * N; i++) {
+    const v = useLog ? Math.log(1 + ampDisplay[i]) : ampDisplay[i];
+    if (v > mx) mx = v;
+  }
+  mx = mx || 1;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const raw = ampDisplay[y * N + x];
+      const mapped = useLog ? Math.log(1 + raw) : raw;
+      const v = Math.round((mapped / mx) * 255);
+      for (let sy = 0; sy < scale; sy++) {
+        for (let sx = 0; sx < scale; sx++) {
+          const pi = ((y * scale + sy) * N * scale + (x * scale + sx)) * 4;
+          imgData.data[pi] = v;
+          imgData.data[pi + 1] = v;
+          imgData.data[pi + 2] = v;
+          imgData.data[pi + 3] = 255;
+        }
+      }
+    }
+  }
+  ctxAmplitude.putImageData(imgData, 0, 0);
+}
+
+function renderPhase() {
+  const scale = parseInt(document.getElementById('displayScale').value);
+  const imgData = ctxPhase.createImageData(N * scale, N * scale);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      // Phase: [-pi, pi] -> [0, 255]
+      const v = Math.round(((phaseDisplay[y * N + x] + Math.PI) / (2 * Math.PI)) * 255);
+      for (let sy = 0; sy < scale; sy++) {
+        for (let sx = 0; sx < scale; sx++) {
+          const pi = ((y * scale + sy) * N * scale + (x * scale + sx)) * 4;
+          imgData.data[pi] = v;
+          imgData.data[pi + 1] = v;
+          imgData.data[pi + 2] = v;
+          imgData.data[pi + 3] = 255;
+        }
+      }
+    }
+  }
+  ctxPhase.putImageData(imgData, 0, 0);
+}
+
+function renderAll() {
+  renderSpatial();
+  renderAmplitude();
+  renderPhase();
+}
+
+// ===== Drawing =====
+let drawing = false;
+let activeCanvas = null;
+
+function getPixelCoords(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  const scale = parseInt(document.getElementById('displayScale').value);
+  const x = Math.floor((e.clientX - rect.left) / scale);
+  const y = Math.floor((e.clientY - rect.top) / scale);
+  return [Math.max(0, Math.min(N - 1, x)), Math.max(0, Math.min(N - 1, y))];
+}
+
+function applyBrush(canvas, px, py) {
+  const brushSize = parseInt(document.getElementById('brushSize').value);
+  const brushValue = parseInt(document.getElementById('brushValue').value);
+  const radius = Math.floor(brushSize / 2);
+
+  if (canvas === canvasSpatial) {
+    // Draw on spatial domain
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius + 1) continue;
+        const x = px + dx;
+        const y = py + dy;
+        if (x < 0 || x >= N || y < 0 || y >= N) continue;
+        spatialReal[y * N + x] = brushValue;
+      }
+    }
+    forwardFFT();
+    renderAll();
+  } else if (canvas === canvasAmplitude) {
+    // Draw on amplitude (display coords, DC-centered)
+    // Enforce conjugate symmetry: amp(u,v) = amp(-u,-v)
+    const useLog = document.getElementById('logScale').checked;
+    // Map brush value [0,255] to amplitude
+    // First find current max for scaling reference
+    let mx = 0;
+    for (let i = 0; i < N * N; i++) {
+      const v = useLog ? Math.log(1 + ampDisplay[i]) : ampDisplay[i];
+      if (v > mx) mx = v;
+    }
+    mx = mx || 1;
+    const targetMapped = (brushValue / 255) * mx;
+    const targetAmp = useLog ? (Math.exp(targetMapped) - 1) : targetMapped;
+
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius + 1) continue;
+        const x = px + dx;
+        const y = py + dy;
+        if (x < 0 || x >= N || y < 0 || y >= N) continue;
+
+        // Set amplitude at (x, y) in display coords
+        const [fx, fy] = fftShiftIndex(x, y);
+        const idx = fy * N + fx;
+        const phase = Math.atan2(freqImag[idx], freqReal[idx]);
+        freqReal[idx] = targetAmp * Math.cos(phase);
+        freqImag[idx] = targetAmp * Math.sin(phase);
+
+        // Mirror: conjugate symmetric point
+        const mx2 = (N - x) % N;
+        const my2 = (N - y) % N;
+        const [fx2, fy2] = fftShiftIndex(mx2, my2);
+        const idx2 = fy2 * N + fx2;
+        freqReal[idx2] = targetAmp * Math.cos(-phase);
+        freqImag[idx2] = targetAmp * Math.sin(-phase);
+
+        ampDisplay[y * N + x] = targetAmp;
+        ampDisplay[my2 * N + mx2] = targetAmp;
+      }
+    }
+    inverseFFT();
+    updateFreqDisplayCache();
+    renderAll();
+  } else if (canvas === canvasPhase) {
+    // Draw on phase (display coords, DC-centered)
+    // Map brush value [0,255] to phase [-pi, pi]
+    const targetPhase = (brushValue / 255) * 2 * Math.PI - Math.PI;
+
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius + 1) continue;
+        const x = px + dx;
+        const y = py + dy;
+        if (x < 0 || x >= N || y < 0 || y >= N) continue;
+
+        const [fx, fy] = fftShiftIndex(x, y);
+        const idx = fy * N + fx;
+        const amp = Math.sqrt(freqReal[idx] * freqReal[idx] + freqImag[idx] * freqImag[idx]);
+        freqReal[idx] = amp * Math.cos(targetPhase);
+        freqImag[idx] = amp * Math.sin(targetPhase);
+
+        // Mirror: conjugate symmetric point gets -phase
+        const mx2 = (N - x) % N;
+        const my2 = (N - y) % N;
+        const [fx2, fy2] = fftShiftIndex(mx2, my2);
+        const idx2 = fy2 * N + fx2;
+        const amp2 = Math.sqrt(freqReal[idx2] * freqReal[idx2] + freqImag[idx2] * freqImag[idx2]);
+        freqReal[idx2] = amp2 * Math.cos(-targetPhase);
+        freqImag[idx2] = amp2 * Math.sin(-targetPhase);
+
+        phaseDisplay[y * N + x] = targetPhase;
+        phaseDisplay[my2 * N + mx2] = -targetPhase;
+      }
+    }
+    inverseFFT();
+    updateFreqDisplayCache();
+    renderAll();
+  }
+}
+
+function onMouseDown(canvas, e) {
+  drawing = true;
+  activeCanvas = canvas;
+  const [px, py] = getPixelCoords(canvas, e);
+  applyBrush(canvas, px, py);
+}
+
+function onMouseMove(canvas, e) {
+  if (!drawing || activeCanvas !== canvas) return;
+  const [px, py] = getPixelCoords(canvas, e);
+  applyBrush(canvas, px, py);
+}
+
+function onMouseUp() {
+  drawing = false;
+  activeCanvas = null;
+}
+
+[canvasSpatial, canvasAmplitude, canvasPhase].forEach(c => {
+  c.addEventListener('mousedown', e => onMouseDown(c, e));
+  c.addEventListener('mousemove', e => onMouseMove(c, e));
+  c.addEventListener('mouseup', onMouseUp);
+  c.addEventListener('mouseleave', onMouseUp);
+});
+
+// ===== Presets =====
+function clearAll() {
+  spatialReal.fill(0);
+  spatialImag.fill(0);
+  forwardFFT();
+  renderAll();
+}
+
+function presetLines() {
+  clearAll();
+  // Horizontal lines
+  for (let y = 0; y < N; y++) {
+    if (y % 12 < 3) {
+      for (let x = 0; x < N; x++) {
+        spatialReal[y * N + x] = 200;
+      }
+    }
+  }
+  forwardFFT();
+  renderAll();
+}
+
+function presetDot() {
+  clearAll();
+  // Gaussian blob at center
+  const cx = N / 2, cy = N / 2;
+  const sigma = N / 10;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      spatialReal[y * N + x] = 255 * Math.exp(-d2 / (2 * sigma * sigma));
+    }
+  }
+  forwardFFT();
+  renderAll();
+}
+
+function presetBox() {
+  clearAll();
+  const s = N / 4;
+  const cx = N / 2, cy = N / 2;
+  for (let y = Math.floor(cy - s / 2); y < cy + s / 2; y++) {
+    for (let x = Math.floor(cx - s / 2); x < cx + s / 2; x++) {
+      spatialReal[y * N + x] = 255;
+    }
+  }
+  forwardFFT();
+  renderAll();
+}
+
+function presetDiagonal() {
+  clearAll();
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      spatialReal[y * N + x] = 127 + 127 * Math.sin(2 * Math.PI * (x + y) * 4 / N);
+    }
+  }
+  forwardFFT();
+  renderAll();
+}
+
+document.getElementById('btnClear').addEventListener('click', clearAll);
+document.getElementById('btnPresetLines').addEventListener('click', presetLines);
+document.getElementById('btnPresetDot').addEventListener('click', presetDot);
+document.getElementById('btnPresetBox').addEventListener('click', presetBox);
+document.getElementById('btnPresetDiag').addEventListener('click', presetDiagonal);
+
+// ===== Import / Export =====
+document.getElementById('btnImport').addEventListener('click', () => {
+  document.getElementById('fileInput').click();
+});
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = N; c.height = N;
+    const ctx = c.getContext('2d');
+    // Scale to fit N x N
+    ctx.drawImage(img, 0, 0, N, N);
+    const data = ctx.getImageData(0, 0, N, N).data;
+    for (let i = 0; i < N * N; i++) {
+      // Convert to grayscale
+      spatialReal[i] = 0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2];
+    }
+    spatialImag.fill(0);
+    forwardFFT();
+    renderAll();
+  };
+  img.src = URL.createObjectURL(file);
+  e.target.value = '';
+});
+
+document.getElementById('btnExportJSON').addEventListener('click', () => {
+  const obj = {
+    N: N,
+    spatialReal: Array.from(spatialReal),
+    freqReal: Array.from(freqReal),
+    freqImag: Array.from(freqImag)
+  };
+  const blob = new Blob([JSON.stringify(obj)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'fourier-data.json';
+  a.click();
+});
+
+// ===== Programmatic API =====
+window.N = N;
+window.loadSpatialFromArray = function(arr) {
+  for (let i = 0; i < N * N; i++) spatialReal[i] = arr[i] || 0;
+  spatialImag.fill(0);
+  forwardFFT();
+  renderAll();
+};
+window.getSpatialReal = () => Array.from(spatialReal);
+window.getFreqReal = () => Array.from(freqReal);
+window.getFreqImag = () => Array.from(freqImag);
+
+// ===== Init =====
+updateCanvasSize();
+presetBox(); // Start with something interesting
+</script>
+</body>
+</html>
